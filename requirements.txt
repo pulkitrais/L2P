@@ -1,0 +1,5 @@
+weasyprint
+markdown
+pygments
+pyperclip
+fpdf2
