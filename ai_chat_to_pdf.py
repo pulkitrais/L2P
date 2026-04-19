@@ -26,7 +26,6 @@ import datetime as dt
 import html
 import re
 import sys
-import tempfile
 import urllib.request
 from pathlib import Path
 from typing import List, Tuple
@@ -74,6 +73,7 @@ ROLE_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"^\s*(user|human)\s*:\s*", re.IGNORECASE), "user"),
     (re.compile(r"^\s*(assistant|ai|model|bot)\s*:\s*", re.IGNORECASE), "assistant"),
 ]
+IMAGE_ACCESS_TIMEOUT_SECONDS = 6
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,7 +102,7 @@ def read_input_markdown(args: argparse.Namespace) -> str:
         try:
             import pyperclip  # type: ignore
         except Exception as exc:
-            raise RuntimeError("pyperclip is required for --clipboard. Install dependencies first.") from exc
+            raise RuntimeError("pyperclip is required for --clipboard. Run: pip install pyperclip") from exc
         value = pyperclip.paste() or ""
         if not value.strip():
             raise RuntimeError("Clipboard appears empty.")
@@ -159,7 +159,7 @@ def split_conversation_blocks(markdown_text: str) -> List[Tuple[str, str]]:
     return [(role, "\n".join(content).strip()) for role, content in blocks]
 
 
-def image_available(url: str, timeout: int = 6) -> bool:
+def can_access_image(url: str, timeout: int = IMAGE_ACCESS_TIMEOUT_SECONDS) -> bool:
     if url.startswith("http://") or url.startswith("https://"):
         req = urllib.request.Request(url, method="HEAD")
         try:
@@ -175,7 +175,7 @@ def preprocess_images(markdown_text: str) -> str:
 
     def repl(match: re.Match[str]) -> str:
         alt, src = match.group(1).strip(), match.group(2).strip()
-        if image_available(src):
+        if can_access_image(src):
             return match.group(0)
         safe_alt = alt or "Image"
         safe_src = html.escape(src)
@@ -186,7 +186,7 @@ def preprocess_images(markdown_text: str) -> str:
 
 def preprocess_math(markdown_text: str) -> str:
     # Basic fallback style for LaTeX snippets in engines without JS math rendering.
-    markdown_text = re.sub(r"\$\$([^$]+)\$\$", r"\n\n```math\n\1\n```\n\n", markdown_text, flags=re.DOTALL)
+    markdown_text = re.sub(r"\$\$(.+?)\$\$", r"\n\n```math\n\1\n```\n\n", markdown_text, flags=re.DOTALL)
     markdown_text = re.sub(r"\$(.+?)\$", r"`\1`", markdown_text)
     return markdown_text
 
@@ -207,6 +207,7 @@ def markdown_to_html(md_text: str) -> str:
     ]
     extension_configs = {
         "codehilite": {
+            # Keep output deterministic across environments and avoid incorrect guesses.
             "guess_lang": False,
             "linenums": False,
             "css_class": "codehilite",
@@ -222,6 +223,10 @@ def get_code_css() -> str:
     except Exception as exc:
         raise RuntimeError("pygments is required for syntax highlighting.") from exc
     return HtmlFormatter(style="friendly").get_style_defs(".codehilite")
+
+
+def format_export_timestamp() -> str:
+    return dt.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
 def conversation_html(markdown_text: str) -> str:
@@ -243,7 +248,7 @@ def conversation_html(markdown_text: str) -> str:
 
 def build_full_html(title: str, model: str, body_html: str, theme_name: str) -> str:
     theme = LIGHT_THEME if theme_name == "light" else DARK_THEME
-    date_text = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    date_text = format_export_timestamp()
     model_key = (model or "").strip().lower()
     model_label = MODEL_LABELS.get(model_key, model.strip()) if model else ""
     model_line = f" • {html.escape(model_label)}" if model_label else ""
@@ -419,7 +424,7 @@ def write_pdf_with_fpdf(markdown_text: str, title: str, model: str, output_path:
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, latin1_safe(title), new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 10)
-    meta = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    meta = format_export_timestamp()
     if model:
         meta += f" | {MODEL_LABELS.get(model.lower(), model)}"
     pdf.cell(0, 8, latin1_safe(meta), new_x="LMARGIN", new_y="NEXT")
@@ -466,8 +471,7 @@ def main() -> int:
         try:
             body = conversation_html(markdown_text)
             full_html = build_full_html(args.title, args.model, body, args.theme)
-            with tempfile.TemporaryDirectory(prefix="ai-chat-pdf-") as _:
-                write_pdf_with_weasyprint(full_html, output_path)
+            write_pdf_with_weasyprint(full_html, output_path)
             print(f"[4/4] Done: {output_path}")
             return 0
         except Exception as exc:
